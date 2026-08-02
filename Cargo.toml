@@ -25,21 +25,6 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# TEMPORARY, and the only thing standing between this repo and a plain
-# `cargo build` on a fresh clone.
-#
-# `kafka-produce` is new in kaas-lib 0.2.1 and is not on crates.io until that
-# release is approved and published. Until then the requirement above cannot
-# resolve, so it is patched to the sibling checkout.
-#
-# Delete this whole block once 0.2.1 is live — nothing else changes, because
-# the version requirement above is already the one that will resolve.
-[patch.crates-io]
-kafka-produce = { path = "../kaas-lib/crates/kafka-produce" }
-kafka-admin   = { path = "../kaas-lib/crates/kafka-admin" }
-kafka-conn    = { path = "../kaas-lib/crates/kafka-conn" }
-kafka-meta    = { path = "../kaas-lib/crates/kafka-meta" }
-
 [lints.clippy]
 # Same rule 2 as kaas-lib, and for a sharper reason: this process is meant to
 # run for weeks. A panic in a heartbeat loop is a canary that stops singing,

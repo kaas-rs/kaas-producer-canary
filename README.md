@@ -21,11 +21,11 @@ Posting the time is easy. What makes the stream diagnostic is that `sequence`
 increases by exactly one per record **independently of the clock**, which
 separates three situations that look identical in a topic full of timestamps:
 
-| what you see | what happened |
-|---|---|
-| gap in `sequence` | records were lost, or a send failed and was reported |
-| gap in time, no gap in `sequence` | the canary was paused or restarted — nothing lost |
-| repeated `sequence` | a duplicate, which `kafka-produce` refuses to cause; a real finding |
+| what you see                      | what happened                                                       |
+|-----------------------------------|---------------------------------------------------------------------|
+| gap in `sequence`                 | records were lost, or a send failed and was reported                |
+| gap in time, no gap in `sequence` | the canary was paused or restarted — nothing lost                   |
+| repeated `sequence`               | a duplicate, which `kafka-produce` refuses to cause; a real finding |
 
 `run_id` changes on every restart, so two canaries writing to one topic never
 look like a single one with a sequence anomaly. It is wall-clock nanoseconds
@@ -34,16 +34,16 @@ share a millisecond timestamp, and pids repeat across restarts and containers.
 
 ## Options
 
-| flag | env | default | |
-|---|---|---|---|
-| `--bootstrap` | `KAAS_CANARY_BOOTSTRAP` | — | comma-separated `host:port` |
-| `--topic` | `KAAS_CANARY_TOPIC` | `kaas-canary` | |
-| `--interval-ms` | `KAAS_CANARY_INTERVAL_MS` | `1000` | |
-| `--create-topic` | `KAAS_CANARY_CREATE_TOPIC` | off | create the topic if missing |
-| `--partitions` / `--replication-factor` | | `1` / `1` | used only with `--create-topic` |
-| `--partition` | | — | pin every record to one partition |
-| `--count` | | — | stop after N beats; runs forever when unset |
-| `--acks-leader` | | off | require only the leader, not the full ISR |
+| flag                                    | env                        | default       |                                             |
+|-----------------------------------------|----------------------------|---------------|---------------------------------------------|
+| `--bootstrap`                           | `KAAS_CANARY_BOOTSTRAP`    | —             | comma-separated `host:port`                 |
+| `--topic`                               | `KAAS_CANARY_TOPIC`        | `kaas-canary` |                                             |
+| `--interval-ms`                         | `KAAS_CANARY_INTERVAL_MS`  | `1000`        |                                             |
+| `--create-topic`                        | `KAAS_CANARY_CREATE_TOPIC` | off           | create the topic if missing                 |
+| `--partitions` / `--replication-factor` |                            | `1` / `1`     | used only with `--create-topic`             |
+| `--partition`                           |                            | —             | pin every record to one partition           |
+| `--count`                               |                            | —             | stop after N beats; runs forever when unset |
+| `--acks-leader`                         |                            | off           | require only the leader, not the full ISR   |
 
 `--create-topic` is off by default on purpose: a canary pointed at a
 production cluster should observe it rather than change it, and a typo in
@@ -73,10 +73,40 @@ reason — this process is meant to run for weeks.
 
 ## Building
 
-`kafka-produce` is new in kaas-lib 0.2.1. Until that release is on crates.io,
-`Cargo.toml` carries a `[patch.crates-io]` block pointing at a sibling
-`../kaas-lib` checkout. Delete the block once 0.2.1 is published — the
-version requirement above it is already the one that will resolve.
+```sh
+cargo build --release
+```
+
+Everything resolves from crates.io — `kafka-produce` ships in kaas-lib 0.2.1.
+
+## Container
+
+```sh
+docker run --rm ghcr.io/kaas-rs/kaas-producer-canary:latest \
+  --bootstrap kafka:9092 --topic kaas-canary
+```
+
+Static musl binary on distroless nonroot, so there is no shell in the image
+and nothing to exec into. Built and published by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) on a `v*` tag;
+`main` builds publish `main` and `sha-<short>` tags for testing, and only a
+semver tag moves `latest`.
+
+## Deployment
+
+Deployed by ArgoCD as **one instance per Kafka cluster**, from
+`apps/kaas/canary/` and `apps/strimzi/canary/` in the cluster repo
+(`Woestebanaan/k3s-cluster`). It gets no namespace of its own: each canary
+sits in the namespace of the broker it watches, so it is scheduled, scaled and
+deleted with that cluster rather than alongside it.
+
+The manifests live there rather than here because that is the repository
+ArgoCD reads; duplicating them would give two sources of truth for one
+Deployment. They **pin an image digest**, not a tag — a canary that silently
+changes version is a canary that cannot be trusted to report anything.
+
+Sync is manual in this cluster, deliberately: a merged commit is not evidence
+that anything changed. Check `argocd app get kaas`, not the git log.
 
 ## Licence
 

@@ -311,3 +311,46 @@ fn hostname() -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Heartbeat {
+        Heartbeat {
+            run_id: "abc-1".to_owned(),
+            sequence: 7,
+            timestamp_ms: 1_785_686_674_238,
+            timestamp: "2026-08-02T16:04:34.238Z".to_owned(),
+            host: "canary-0".to_owned(),
+        }
+    }
+
+    /// The payload is a contract: something downstream parses these fields by
+    /// name. Renaming one is a breaking change to every consumer, and it is
+    /// the kind of change that looks harmless in a diff.
+    #[test]
+    fn the_payload_shape_is_stable() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        assert_eq!(
+            json,
+            r#"{"run_id":"abc-1","sequence":7,"timestamp_ms":1785686674238,"timestamp":"2026-08-02T16:04:34.238Z","host":"canary-0"}"#
+        );
+    }
+
+    #[test]
+    fn the_two_timestamps_agree() {
+        // One is for sorting and one is for reading; they are set from a
+        // single clock reading and must not drift apart.
+        let beat = sample();
+        let parsed = chrono::DateTime::parse_from_rfc3339(&beat.timestamp).unwrap();
+        assert_eq!(parsed.timestamp_millis(), beat.timestamp_ms);
+    }
+
+    #[test]
+    fn a_run_id_is_not_reused() {
+        // Two runs must be distinguishable, or "two canaries on one topic" and
+        // "one canary with a sequence anomaly" become the same observation.
+        assert_ne!(run_id(), run_id());
+    }
+}
