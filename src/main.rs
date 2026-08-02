@@ -28,6 +28,9 @@
 //! report, and its silence gets attributed to the cluster.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Tests may unwrap freely: a panic there is a failed assertion, which is the
+// mechanism, not a crash in a process that is meant to run for weeks.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
