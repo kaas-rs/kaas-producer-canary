@@ -1,0 +1,52 @@
+[package]
+name        = "kaas-producer-canary"
+description = "Writes a timestamped JSON heartbeat to a Kafka topic once a second, using kaas-lib."
+version     = "0.1.0"
+edition     = "2024"
+license     = "Apache-2.0"
+publish     = false
+
+[dependencies]
+# The library under test. This is the point of the canary: it exercises
+# kaas-lib's write path continuously against a real cluster, which is the one
+# thing neither the container acceptance suite nor a one-shot live run can do
+# — they both stop after a few seconds, and the failures worth catching here
+# are the ones that need hours (a leader election, a re-authentication window,
+# a slow connection leak).
+kafka-produce = "0.2"
+kafka-admin   = "0.2"
+
+tokio  = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "time"] }
+clap   = { version = "4.5", features = ["derive", "env"] }
+serde  = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TEMPORARY, and the only thing standing between this repo and a plain
+# `cargo build` on a fresh clone.
+#
+# `kafka-produce` is new in kaas-lib 0.2.1 and is not on crates.io until that
+# release is approved and published. Until then the requirement above cannot
+# resolve, so it is patched to the sibling checkout.
+#
+# Delete this whole block once 0.2.1 is live — nothing else changes, because
+# the version requirement above is already the one that will resolve.
+[patch.crates-io]
+kafka-produce = { path = "../kaas-lib/crates/kafka-produce" }
+kafka-admin   = { path = "../kaas-lib/crates/kafka-admin" }
+kafka-conn    = { path = "../kaas-lib/crates/kafka-conn" }
+kafka-meta    = { path = "../kaas-lib/crates/kafka-meta" }
+
+[lints.clippy]
+# Same rule 2 as kaas-lib, and for a sharper reason: this process is meant to
+# run for weeks. A panic in a heartbeat loop is a canary that stops singing,
+# which reads as "the cluster is down" and is not.
+unwrap_used = "deny"
+expect_used = "deny"
+panic       = "deny"
+
+[lints.rust]
+unsafe_code = "forbid"
