@@ -11,9 +11,19 @@ cargo run -- --bootstrap localhost:9092 --topic kaas-canary
 {"run_id":"18c80891ba0e656b-3dbdc8","sequence":1,"timestamp_ms":1785686674238,"timestamp":"2026-08-02T16:04:34.238Z","host":"canary-0"}
 ```
 
-Each record also carries two headers: `content-type: application/json` and
-`canary-run: <run_id>`, so a consumer can filter by run without parsing the
-body.
+Each record also carries three headers, so a consumer can filter without
+parsing the body:
+
+| header           | value                    |                                        |
+|------------------|--------------------------|----------------------------------------|
+| `content-type`   | `application/json`       |                                        |
+| `canary-run`     | `<run_id>`               | which run wrote it; changes on restart |
+| `canary-version` | the crate version        | which build wrote it                   |
+
+`canary-version` is there because the canary's own version changes what the
+stream looks like — idempotence arriving in kaas-lib 0.3.0 quietly removed a
+class of `sequence` gap. A reader comparing two periods needs to know whether
+it is comparing two clusters or two canaries.
 
 ## Why `sequence` is the point
 

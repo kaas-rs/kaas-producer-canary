@@ -13,6 +13,10 @@ use kafka_produce::{Producer, ProducerRecord};
 
 use crate::heartbeat::{self, Heartbeat};
 
+/// The build writing the heartbeats, taken from the manifest at compile time
+/// so it cannot drift from the binary the way a hand-maintained constant does.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// How the canary beats.
 ///
 /// Everything the loop needs and nothing it does not. Built from the command
@@ -143,6 +147,12 @@ impl Canary {
                 .with_value(payload)
                 .with_header("content-type", "application/json")
                 .with_header("canary-run", self.run_id.clone())
+                // Which build wrote this. A canary's own version changes what
+                // the stream looks like — idempotence arriving in kaas-lib
+                // 0.3.0 quietly removed a class of `sequence` gap — so a reader
+                // comparing two periods needs to know whether it is comparing
+                // two clusters or two canaries.
+                .with_header("canary-version", VERSION)
                 // The record timestamp and the one in the body are set from the
                 // same reading, so a consumer can tell broker-side rewriting
                 // (LogAppendTime) from clock skew by comparing them.
