@@ -1,0 +1,40 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        // The same arguments the deployed pod runs with
+        // (apps/kaas/canary/deployment.yaml in Woestebanaan/k3s-cluster), so a
+        // debug session exercises the write path against the real broker
+        // rather than a local stand-in.
+        //
+        // This writes into the live `kaas-canary` topic beside the running
+        // canary. That is safe by design rather than by luck: `run_id` is new
+        // every start, so a reader tells two writers apart from one writer
+        // with a sequence anomaly. It does mean a debug session shows up in
+        // the stream — add `--count 10` to bound it, or `--partition` to keep
+        // it off the partition the deployed canary is writing to.
+        //
+        // Reaching the broker needs cluster DNS, which this dev container has:
+        // kaas.kaas.svc.cluster.local resolves to the ClusterIP of the `kaas`
+        // service in the `kaas` namespace.
+        {
+            "name": "Debug against the kaas broker",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=kaas-producer-canary"
+                ]
+            },
+            "args": [
+                "--bootstrap",
+                "kaas.kaas.svc.cluster.local:9092",
+                "--topic",
+                "kaas-canary"
+            ]
+        }
+    ]
+}
