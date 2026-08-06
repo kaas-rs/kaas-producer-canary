@@ -71,13 +71,20 @@ report, and its silence gets attributed to the cluster rather than to itself.
 `unwrap`, `expect` and `panic!` are denied at the crate root for the same
 reason — this process is meant to run for weeks.
 
+## Style
+
+Optional configuration is a consuming `with_*` builder on the type itself, the
+convention kaas-lib uses. [`STYLE.md`](STYLE.md) is the whole of it, including
+the one place this crate deviates: it is a binary, so a speculative setter is
+a `dead_code` build failure rather than unused API.
+
 ## Building
 
 ```sh
 cargo build --release
 ```
 
-Everything resolves from crates.io — `kafka-produce` ships in kaas-lib 0.2.1.
+Everything resolves from crates.io — `kafka-produce` ships in kaas-lib 0.4.0.
 
 ## Container
 

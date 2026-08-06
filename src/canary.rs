@@ -19,17 +19,51 @@ use crate::heartbeat::{self, Heartbeat};
 /// line at the boundary rather than threaded through it, so this module does
 /// not know that a command line exists — and so a new flag cannot start
 /// influencing the loop without somebody writing the line that lets it.
+///
+/// Built the way kaas-lib's own types are — see `STYLE.md`. The topic and the
+/// interval are in `new` because a schedule without either is not one; the
+/// rest arrive as `Option`s from flags that may not have been given, so they
+/// are `with_maybe_*` setters that relay rather than decide.
 #[derive(Debug, Clone)]
 pub struct Schedule {
     /// The topic to write to.
-    pub topic: String,
+    topic: String,
     /// How long between heartbeats.
-    pub interval: Duration,
+    interval: Duration,
     /// Write every record to this partition, rather than letting the
     /// partitioner choose.
-    pub partition: Option<i32>,
+    partition: Option<i32>,
     /// Stop after this many heartbeats. Runs forever when `None`.
-    pub count: Option<u64>,
+    count: Option<u64>,
+}
+
+impl Schedule {
+    /// Beat on `topic`, every `interval`.
+    pub fn new(topic: impl Into<String>, interval: Duration) -> Self {
+        Self {
+            topic: topic.into(),
+            interval,
+            partition: None,
+            count: None,
+        }
+    }
+
+    /// Pin every record to a partition, when one was chosen for us.
+    ///
+    /// `None` leaves the choice to the partitioner, which for a keyless record
+    /// means sticking to one partition anyway — but one the cluster picked.
+    #[must_use]
+    pub fn with_maybe_partition(mut self, partition: Option<i32>) -> Self {
+        self.partition = partition;
+        self
+    }
+
+    /// Stop after this many heartbeats, when a limit was given.
+    #[must_use]
+    pub fn with_maybe_count(mut self, count: Option<u64>) -> Self {
+        self.count = count;
+        self
+    }
 }
 
 /// A canary, mid-flight.
@@ -105,17 +139,15 @@ impl Canary {
                 }
             };
 
-            let mut record = ProducerRecord::new(&self.schedule.topic)
-                .value(payload)
-                .header("content-type", "application/json")
-                .header("canary-run", self.run_id.clone())
+            let record = ProducerRecord::new(&self.schedule.topic)
+                .with_value(payload)
+                .with_header("content-type", "application/json")
+                .with_header("canary-run", self.run_id.clone())
                 // The record timestamp and the one in the body are set from the
                 // same reading, so a consumer can tell broker-side rewriting
                 // (LogAppendTime) from clock skew by comparing them.
-                .timestamp(heartbeat.timestamp_ms);
-            if let Some(partition) = self.schedule.partition {
-                record = record.partition(partition);
-            }
+                .with_timestamp(heartbeat.timestamp_ms)
+                .with_maybe_partition(self.schedule.partition);
 
             match producer.send(record).await {
                 Ok(metadata) => {

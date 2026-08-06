@@ -94,24 +94,19 @@ impl Args {
 
     /// What the heartbeat loop needs.
     pub fn schedule(&self) -> Schedule {
-        Schedule {
-            topic: self.topic.clone(),
-            // A zero-millisecond interval is a tight loop writing as fast as
-            // the cluster will take it, which is a load generator rather than a
-            // canary — and it would be one pointed at production.
-            interval: Duration::from_millis(self.interval_ms.max(1)),
-            partition: self.partition,
-            count: self.count,
-        }
+        // A zero-millisecond interval is a tight loop writing as fast as the
+        // cluster will take it, which is a load generator rather than a canary
+        // — and it would be one pointed at production.
+        Schedule::new(&self.topic, Duration::from_millis(self.interval_ms.max(1)))
+            .with_maybe_partition(self.partition)
+            .with_maybe_count(self.count)
     }
 
     /// What to create, if `--create-topic` was given.
     pub fn topic_spec(&self) -> TopicSpec {
-        TopicSpec {
-            name: self.topic.clone(),
-            partitions: self.partitions,
-            replication_factor: self.replication_factor,
-        }
+        TopicSpec::new(&self.topic)
+            .with_partitions(self.partitions)
+            .with_replication_factor(self.replication_factor)
     }
 
     /// How many replicas must acknowledge a write.
