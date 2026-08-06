@@ -19,7 +19,7 @@ use crate::topic::TopicSpec;
 #[derive(Debug, Parser)]
 #[command(
     name = "kaas-producer-canary",
-    about = "Write a timestamped JSON heartbeat to a Kafka topic on an interval."
+    about = "Write a timestamped Avro heartbeat to a Kafka topic on an interval."
 )]
 pub struct Args {
     /// Comma-separated bootstrap servers.
@@ -29,6 +29,15 @@ pub struct Args {
     /// The topic to write to.
     #[arg(long, env = "KAAS_CANARY_TOPIC", default_value = "kaas-canary")]
     pub topic: String,
+
+    /// Base URL of the Confluent-compatible schema registry.
+    ///
+    /// Required, and without a default on purpose. Every record is Avro framed
+    /// with a schema id, so there is no format to fall back to when this is
+    /// missing — a canary that started anyway would be writing bytes nothing
+    /// can read. Apicurio serves this API under `/apis/ccompat/v7`.
+    #[arg(long, env = "KAAS_CANARY_SCHEMA_REGISTRY")]
+    pub schema_registry: String,
 
     /// How long between heartbeats.
     #[arg(long, env = "KAAS_CANARY_INTERVAL_MS", default_value_t = 1_000)]
@@ -90,6 +99,29 @@ impl Args {
             anyhow::bail!("--bootstrap resolved to no addresses");
         }
         Ok(servers)
+    }
+
+    /// The registry URL, checked for the one thing this build cannot do.
+    ///
+    /// `schema_registry_converter` is compiled without a TLS backend here —
+    /// `Cargo.toml` says why, and it is a decision about the release image
+    /// rather than about the registry. The consequence is that an `https://`
+    /// URL fails inside reqwest, at the first encode, with a message about URL
+    /// schemes. Catching it at the boundary instead means the error names the
+    /// flag that was wrong, which is the same reason `bootstrap_servers`
+    /// rejects an empty list here rather than letting a client fail deeper.
+    pub fn schema_registry_url(&self) -> Result<&str> {
+        let url = self.schema_registry.trim();
+        if url.is_empty() {
+            anyhow::bail!("--schema-registry is empty");
+        }
+        if !url.starts_with("http://") {
+            anyhow::bail!(
+                "--schema-registry must be an http:// URL, got {url:?} — \
+                 this build has no TLS backend, see Cargo.toml"
+            );
+        }
+        Ok(url)
     }
 
     /// What the heartbeat loop needs.

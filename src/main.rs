@@ -1,4 +1,4 @@
-//! A heartbeat producer: one timestamped JSON record per second, forever.
+//! A heartbeat producer: one timestamped Avro record per second, forever.
 //!
 //! # What makes it a canary rather than a clock
 //!
@@ -26,16 +26,37 @@
 //! job. This end can only claim; an acknowledgement describes the leader's log
 //! at one instant, not what a reader finds there later.
 //!
+//! # Why the records are Avro
+//!
+//! The claim above — that a reader can tell three situations apart — assumes
+//! the reader still parses the record. A JSON payload made that an assumption:
+//! nothing stopped this crate renaming a field, and the only thing that
+//! noticed was a test in a different repository. The schema is now registered
+//! before the first beat, and the registry refuses a version that is not
+//! backward compatible with the last, so the assumption is checked by the
+//! thing every consumer already trusts rather than by convention.
+//!
+//! It is also the honest configuration for a canary that watches a Kafka
+//! cluster this one is a client of: schema-registry-framed Avro is what the
+//! traffic here actually looks like, and a canary writing something simpler
+//! than production traffic exercises less than it appears to.
+//!
 //! # Failure policy
 //!
 //! A failed send is logged and counted; the loop continues. A canary that
 //! exits on the first error stops reporting exactly when there is something to
 //! report, and its silence gets attributed to the cluster.
 //!
+//! Startup is the exception, and the registry is part of it: see
+//! [`registry`]'s module docs for why a schema that cannot be registered stops
+//! the process, and why a registry that goes down afterwards does not.
+//!
 //! # Layout
 //!
 //! * [`cli`] — the command line, and the conversions out of it.
-//! * [`heartbeat`] — the payload and the identity of whoever wrote it.
+//! * [`heartbeat`] — the payload, its schema, and the identity of whoever
+//!   wrote it.
+//! * [`registry`] — registering that schema, and encoding against it.
 //! * [`canary`] — the loop.
 //! * [`topic`] — creating the topic, when that is asked for.
 //!
@@ -49,6 +70,7 @@
 mod canary;
 mod cli;
 mod heartbeat;
+mod registry;
 mod topic;
 
 use anyhow::{Context, Result};
@@ -58,13 +80,19 @@ use kafka_produce::{Producer, ProducerConfig};
 
 use crate::canary::Canary;
 use crate::cli::Args;
+use crate::registry::Encoder;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
 
     let args = Args::parse();
+    // Both conversions before either connection, so that a malformed flag is
+    // reported as a malformed flag. Checking the registry URL after
+    // `Admin::connect` would mean a typo in it surfaced only once the cluster
+    // was reachable — and on an unreachable cluster, never at all.
     let bootstrap = args.bootstrap_servers()?;
+    let registry_url = args.schema_registry_url()?;
 
     let admin = Admin::connect(bootstrap, ClusterConfig::default())
         .await
@@ -73,6 +101,11 @@ async fn main() -> Result<()> {
     if args.create_topic {
         topic::ensure(&admin, &args.topic_spec()).await?;
     }
+
+    // Before the producer, and fatal: see `registry`'s module docs. A canary
+    // that cannot encode has nothing to say, and finding that out now is
+    // cheaper than finding it out once a second for a week.
+    let encoder = Encoder::register(registry_url, &args.topic).await?;
 
     let config = ProducerConfig::new().acks(args.acks());
     let producer = Producer::new(admin.cluster().clone(), config);
@@ -84,13 +117,14 @@ async fn main() -> Result<()> {
         run_id = %canary.run_id(),
         host = %canary.host(),
         acks = args.acks_label(),
+        subject = encoder.subject(),
         "canary starting"
     );
 
     // Scoped so the loop's borrow of `canary` ends with the future, leaving the
     // counters readable below whether the loop returned or ctrl-c cancelled it.
     {
-        let beating = canary.beat(&producer);
+        let beating = canary.beat(&producer, &encoder);
         tokio::select! {
             result = beating => result?,
             signal = tokio::signal::ctrl_c() => {

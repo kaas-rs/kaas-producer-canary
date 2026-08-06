@@ -12,6 +12,7 @@ use anyhow::Result;
 use kafka_produce::{Producer, ProducerRecord};
 
 use crate::heartbeat::{self, Heartbeat};
+use crate::registry::Encoder;
 
 /// The build writing the heartbeats, taken from the manifest at compile time
 /// so it cannot drift from the binary the way a hand-maintained constant does.
@@ -115,7 +116,7 @@ impl Canary {
     ///
     /// Returns when `Schedule::count` is reached, and otherwise not at all —
     /// the caller ends it by dropping the future.
-    pub async fn beat(&mut self, producer: &Producer) -> Result<()> {
+    pub async fn beat(&mut self, producer: &Producer, encoder: &Encoder) -> Result<()> {
         let mut ticker = tokio::time::interval(self.schedule.interval);
         // If a send takes longer than the interval — a leader election will do
         // it — catching up by firing the missed ticks back to back would write
@@ -131,13 +132,16 @@ impl Canary {
 
             let heartbeat = Heartbeat::now(&self.run_id, &self.host, sequence);
 
-            let payload = match serde_json::to_vec(&heartbeat) {
+            // No HTTP happens here: the encoder resolved and cached the schema
+            // at startup, so this is Avro serialisation and a five-byte prefix.
+            // A failure means the record does not match the schema, which is a
+            // bug in this crate rather than a fault in the cluster — counted
+            // as a failure all the same, because the beat did not happen and
+            // `sequence` has already moved on.
+            let payload = match encoder.encode(&heartbeat).await {
                 Ok(payload) => payload,
                 Err(error) => {
-                    // Serialising our own struct cannot realistically fail, but
-                    // rule 2 says a library does not get to find out the hard
-                    // way.
-                    tracing::error!(%error, sequence, "could not serialise a heartbeat");
+                    tracing::error!(%error, sequence, "could not encode a heartbeat");
                     self.failed += 1;
                     continue;
                 }
@@ -145,7 +149,12 @@ impl Canary {
 
             let record = ProducerRecord::new(&self.schedule.topic)
                 .with_value(payload)
-                .with_header("content-type", "application/json")
+                // Avro under Confluent's framing: a zero byte, the schema id
+                // big-endian, then the datum. Named rather than
+                // `application/avro` because the prefix is the half a reader
+                // gets wrong, and a plain `avro/binary` would not warn them
+                // that the first five bytes are not part of the datum.
+                .with_header("content-type", "application/vnd.confluent.avro+binary")
                 .with_header("canary-run", self.run_id.clone())
                 // Which build wrote this. A canary's own version changes what
                 // the stream looks like — idempotence arriving in kaas-lib

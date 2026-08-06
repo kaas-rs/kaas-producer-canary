@@ -16,6 +16,32 @@ publish     = false
 kafka-produce = "0.4"
 kafka-admin   = "0.4"
 
+# Avro, and the Confluent wire format around it.
+#
+# No TLS feature, which is a deliberate exclusion rather than an oversight.
+# Both of the crate's options reach for a C project: `native_tls` wants
+# OpenSSL, and `rustls_tls` resolves to `reqwest/rustls`, which pins
+# `rustls/aws-lc-rs` and so pulls `aws-lc-sys` and cmake. Either one costs this
+# repository the property its Dockerfile is built on — a static musl image
+# whose only build package is `musl-dev`. Worse, `aws-lc-rs` would also arrive
+# in the same `rustls` that kaas-lib uses with `ring`, which changes what
+# `default_provider()` resolves to for the Kafka connection this canary exists
+# to watch. That is not a change to make as a side effect of adding Avro.
+#
+# The cost is that `--schema-registry` takes `http://` only; `cli.rs` rejects
+# anything else at the boundary rather than letting reqwest fail per-record
+# with a message about URL schemes. In-cluster that is the whole requirement —
+# the registry is a ClusterIP service one hop away.
+#
+# `futures` is what gates `async_impl`; without it only the blocking encoder
+# exists, and a blocking HTTP call inside a tokio worker is not an option here.
+#
+# `apache-avro` is a direct dependency because the schema is written here, and
+# its version must track whatever `schema_registry_converter` resolves — the
+# `Schema` handed to `get_supplied_schema` is that crate's type, not ours.
+schema_registry_converter = { version = "4.10", default-features = false, features = ["avro", "futures"] }
+apache-avro = "0.21"
+
 tokio  = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "time"] }
 clap   = { version = "4.5", features = ["derive", "env"] }
 serde  = { version = "1", features = ["derive"] }
