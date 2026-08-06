@@ -9,17 +9,47 @@ use anyhow::{Context, Result};
 use kafka_admin::{Admin, NewTopic};
 
 /// The topic to create, if it turns out to be missing.
+///
+/// Built the way kaas-lib's own types are — see `STYLE.md`. Only the name is
+/// required: a single-partition, single-replica topic is what a canary wants
+/// on a cluster that has not been told otherwise, so both of the others have a
+/// defensible default and are therefore setters.
 #[derive(Debug, Clone)]
 pub struct TopicSpec {
     /// The topic name.
-    pub name: String,
+    name: String,
     /// Partitions to use when creating it.
-    pub partitions: i32,
+    partitions: i32,
     /// Replication factor to use when creating it.
     ///
     /// `i16` because that is the width of the protocol field; a value that does
     /// not fit is not a replication factor.
-    pub replication_factor: i16,
+    replication_factor: i16,
+}
+
+impl TopicSpec {
+    /// A single-partition, single-replica topic called `name`.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            partitions: 1,
+            replication_factor: 1,
+        }
+    }
+
+    /// Create it with this many partitions.
+    #[must_use]
+    pub fn with_partitions(mut self, partitions: i32) -> Self {
+        self.partitions = partitions;
+        self
+    }
+
+    /// Create it with this replication factor.
+    #[must_use]
+    pub fn with_replication_factor(mut self, replication_factor: i16) -> Self {
+        self.replication_factor = replication_factor;
+        self
+    }
 }
 
 /// Create the topic if it is missing, and say which happened.
