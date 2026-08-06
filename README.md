@@ -38,6 +38,13 @@ stream looks like — idempotence arriving in kaas-lib 0.3.0 quietly removed a
 class of `sequence` gap. A reader comparing two periods needs to know whether
 it is comparing two clusters or two canaries.
 
+This crate's **0.3.0 is the sharpest example yet**: it is where the payload
+stopped being JSON. A topic written across that boundary holds both formats,
+split at whatever offset the rollout happened to land on, and this header is
+the only thing in the record that says which side of it you are reading —
+the body cannot tell you, because deciding how to parse the body is the
+question.
+
 ## The schema, and how it gets there
 
 The schema is `SCHEMA` in [`src/heartbeat.rs`](src/heartbeat.rs), a record
