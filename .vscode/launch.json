@@ -4,21 +4,33 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        // The same arguments the deployed pod runs with
-        // (apps/kaas/canary/deployment.yaml in Woestebanaan/k3s-cluster), so a
-        // debug session exercises the write path against the real broker
-        // rather than a local stand-in.
+        // One configuration per cluster, carrying the same arguments the
+        // deployed pod runs with (apps/kaas/canary/producer.yaml and
+        // apps/strimzi/canary/producer.yaml in Woestebanaan/k3s-cluster), so a
+        // debug session exercises the write path against a real broker rather
+        // than a local stand-in.
         //
-        // This writes into the live `kaas-canary` topic beside the running
+        // Two of them because the pair is the point: the same binary against
+        // two independent broker implementations is a standing conformance
+        // check, and a divergence is only visible if you can run both.
+        //
+        // These write into the live `kaas-canary-v1` topic beside the running
         // canary. That is safe by design rather than by luck: `run_id` is new
         // every start, so a reader tells two writers apart from one writer
         // with a sequence anomaly. It does mean a debug session shows up in
         // the stream — add `--count 10` to bound it, or `--partition` to keep
         // it off the partition the deployed canary is writing to.
         //
-        // Reaching the broker needs cluster DNS, which this dev container has:
-        // kaas.kaas.svc.cluster.local resolves to the ClusterIP of the `kaas`
-        // service in the `kaas` namespace.
+        // `--schema-registry` is required: every record is Avro framed with a
+        // schema id, so there is no format to fall back to. A debug session
+        // registers the same schema the deployed canary does, under the same
+        // subject `kaas-canary-v1-value`, which is idempotent — the registry
+        // returns the existing id rather than making a version. Note the
+        // registry currently runs on in-memory H2, so it is empty after a
+        // restart; a debug run re-registering is one way it comes back.
+        //
+        // All of this needs cluster DNS, which this dev container has: the
+        // three service names below resolve to their ClusterIPs.
         {
             "name": "Debug against the kaas broker",
             "type": "lldb",
@@ -33,7 +45,28 @@
                 "--bootstrap",
                 "kaas.kaas.svc.cluster.local:9092",
                 "--topic",
-                "kaas-canary"
+                "kaas-canary-v1",
+                "--schema-registry",
+                "http://apicurio-registry.apicurio.svc.cluster.local:8080/apis/ccompat/v7"
+            ]
+        },
+        {
+            "name": "Debug against the strimzi broker",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=kaas-producer-canary"
+                ]
+            },
+            "args": [
+                "--bootstrap",
+                "kafka-cluster-kafka-bootstrap.strimzi.svc.cluster.local:9092",
+                "--topic",
+                "kaas-canary-v1",
+                "--schema-registry",
+                "http://apicurio-registry.apicurio.svc.cluster.local:8080/apis/ccompat/v7"
             ]
         }
     ]
