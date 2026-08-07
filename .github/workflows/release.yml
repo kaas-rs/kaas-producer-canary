@@ -38,6 +38,21 @@ env:
 jobs:
   image:
     runs-on: arc-runner-set-producer-canary
+    # A release that cannot find a runner should say so, not wait.
+    #
+    # On 2026-08-06 the ARC scale set for this repo lost its listener: a spec
+    # change landed while a runner still had a job in flight, the controller
+    # tore the listener down to replace it, and never built the new one. Jobs
+    # went on queueing against a label nothing was listening for. Three runs
+    # sat there for 2h24m, 3h07m and 21h22m and were killed by hand — no
+    # runner, no steps, and `--log` reporting only "log not found", because a
+    # job that never started has nothing to report.
+    #
+    # Published builds took 2m29s, 4m13s and 8m36s, so 30 minutes is a wide
+    # margin over a cold cache and still a small fraction of a working day.
+    # Note this bounds the *build*: GitHub's own 24h limit on unclaimed
+    # self-hosted jobs is what ultimately reaps a queue with no listener.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

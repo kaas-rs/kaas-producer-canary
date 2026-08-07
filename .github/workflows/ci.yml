@@ -36,6 +36,10 @@ concurrency:
 jobs:
   rust:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-runner-set-producer-canary' }}
+    # See the note in release.yml: when the ARC listener goes missing, jobs
+    # queue against a label nothing answers rather than failing. Both jobs
+    # here reach the same scale set, so both need the same bound.
+    timeout-minutes: 30
     steps:
       # `ring` — reached through rustls, through kaas-lib — has a build script
       # that needs a working C compiler and linker. The ARC image has neither;
@@ -116,6 +120,7 @@ jobs:
   # at release time means finding them when you wanted to ship.
   image:
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-runner-set-producer-canary' }}
+    timeout-minutes: 30
     steps:
       # On ARC, docker comes from the DinD sidecar, which is not ready the
       # instant the runner container starts. On ubuntu-latest the daemon is
