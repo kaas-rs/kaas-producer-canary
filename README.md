@@ -162,7 +162,8 @@ a `dead_code` build failure rather than unused API.
 cargo build --release
 ```
 
-Everything resolves from crates.io — `kafka-produce` ships in kaas-lib 0.4.0.
+Everything resolves from crates.io — `kafka-produce` and `kafka-admin` are
+pinned at kaas-lib 0.7.
 
 ## Container
 

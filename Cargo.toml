@@ -13,8 +13,8 @@ publish     = false
 # — they both stop after a few seconds, and the failures worth catching here
 # are the ones that need hours (a leader election, a re-authentication window,
 # a slow connection leak).
-kafka-produce = "0.4"
-kafka-admin   = "0.4"
+kafka-produce = "0.7"
+kafka-admin   = "0.7"
 
 # Avro, and the Confluent wire format around it.
 #
