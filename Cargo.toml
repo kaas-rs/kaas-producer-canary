@@ -1,7 +1,7 @@
 [package]
 name        = "kaas-producer-canary"
 description = "Writes a timestamped Avro heartbeat to a Kafka topic once a second, using kaas-lib."
-version     = "0.3.0"
+version     = "0.4.0"
 edition     = "2024"
 license     = "Apache-2.0"
 publish     = false
@@ -15,6 +15,55 @@ publish     = false
 # a slow connection leak).
 kafka-produce = "0.7"
 kafka-admin   = "0.7"
+# Direct rather than through kafka-admin, which re-exports only the error types.
+# TLS, SASL and the `TokenProvider` trait are kafka-conn's, and OAUTHBEARER
+# needs all three. Not a new dependency in any real sense: the same
+# lockstep-released library, already in the tree underneath the two above.
+#
+# Deliberately WITHOUT the `oidc` feature. That feature is a
+# `client_credentials` exchange with a client secret, which is not the flow this
+# canary uses — and kaas-lib is a Kafka client library, so the federated
+# exchange that replaces it belongs here rather than there. `token.rs` implements
+# it against the generic `TokenProvider` trait, which is the seam kaas-lib
+# offers for exactly this.
+kafka-conn    = "0.7"
+
+# The token exchange in `token.rs`, and nothing else. Pinned to match kaas-lib's
+# own workspace pins exactly, which is the whole reason this is safe to add:
+# `hyper-rustls` with `default-features = false, features = ["ring"]` brings no
+# second crypto provider, so `default_provider()` still resolves to ring for the
+# Kafka connection this canary exists to watch, and nothing here needs cmake or
+# a C toolchain. The image stays a static musl build whose only build package is
+# `musl-dev`.
+#
+# The alternative was `azure_identity`, which does exactly this exchange and is
+# maintained by people who own the protocol. It is not usable here: it resolves
+# to 194 additional packages including `aws-lc-rs` and `aws-lc-sys`, which is
+# both the C toolchain this image refuses and the second provider the Avro block
+# below refuses. In a Go or Python canary it would be the right answer.
+hyper           = { version = "1.8", features = ["client", "http1"] }
+hyper-util      = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls    = { version = "0.27", default-features = false, features = [
+    "http1",
+    "ring",
+    "tls12",
+    "logging",
+] }
+http-body-util  = "0.1"
+form_urlencoded = "1.2"
+bytes           = "1.12"
+# `ring` is named explicitly when the client config is built rather than left to
+# `rustls`'s process-wide default provider. Same reasoning as kaas-lib's own
+# TlsConfig: a default provider is global mutable state that any dependency can
+# install first, and "whichever crate initialised earliest wins" is not a
+# property to hang a TLS handshake on.
+rustls              = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+rustls-native-certs = "0.8"
 
 # Avro, and the Confluent wire format around it.
 #
@@ -61,3 +110,4 @@ panic       = "deny"
 
 [lints.rust]
 unsafe_code = "forbid"
+

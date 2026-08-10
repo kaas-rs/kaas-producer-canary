@@ -54,6 +54,10 @@
 //! # Layout
 //!
 //! * [`cli`] — the command line, and the conversions out of it.
+//! * [`identity`] — workload identity, read from the environment rather than
+//!   asked for, and why it is the one thing here with no flag.
+//! * [`token`] — the EntraID token exchange behind it, and why that lives in
+//!   this crate rather than in kaas-lib.
 //! * [`heartbeat`] — the payload, its schema, and the identity of whoever
 //!   wrote it.
 //! * [`registry`] — registering that schema, and encoding against it.
@@ -70,16 +74,20 @@
 mod canary;
 mod cli;
 mod heartbeat;
+mod identity;
 mod registry;
+mod token;
 mod topic;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use kafka_admin::{Admin, ClusterConfig};
+use kafka_conn::ConnectionConfig;
 use kafka_produce::{Producer, ProducerConfig};
 
 use crate::canary::Canary;
 use crate::cli::Args;
+use crate::identity::WorkloadIdentity;
 use crate::registry::Encoder;
 
 #[tokio::main]
@@ -93,8 +101,25 @@ async fn main() -> Result<()> {
     // was reachable — and on an unreachable cluster, never at all.
     let bootstrap = args.bootstrap_servers()?;
     let registry_url = args.schema_registry_url()?;
+    // Also before the connection, and for the same reason: a half-set identity
+    // is a configuration fault, and finding it here means the message names the
+    // variable rather than the handshake it eventually broke.
+    let identity = WorkloadIdentity::from_env()?;
 
-    let admin = Admin::connect(bootstrap, ClusterConfig::default())
+    let mut cluster = ClusterConfig::default();
+    if let Some(identity) = &identity {
+        // TLS is not optional once there is a bearer token to send. OAUTHBEARER
+        // over a plaintext listener puts an access token on the wire in the
+        // clear, and unlike a password it is accepted by the broker from
+        // whoever replays it until it expires. So the presence of an identity
+        // decides the transport too — there is no flag to get this wrong with.
+        cluster.connection = ConnectionConfig::new()
+            .with_tls(args.tls_config()?)
+            .with_sasl(identity.sasl()?);
+        tracing::info!(identity = %identity.describe(), "workload identity detected");
+    }
+
+    let admin = Admin::connect(bootstrap, cluster)
         .await
         .context("connecting to the cluster")?;
 
@@ -118,6 +143,14 @@ async fn main() -> Result<()> {
         host = %canary.host(),
         acks = args.acks_label(),
         subject = encoder.subject(),
+        // Worth a field of its own: "which listener did this actually reach"
+        // is the first question about any heartbeat gap, and the answer is not
+        // recoverable from the bootstrap address alone.
+        auth = if identity.is_some() {
+            "oauthbearer"
+        } else {
+            "none"
+        },
         "canary starting"
     );
 

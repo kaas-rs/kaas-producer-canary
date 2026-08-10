@@ -110,6 +110,7 @@ share a millisecond timestamp, and pids repeat across restarts and containers.
 | `--partition`                           |                            | —             | pin every record to one partition           |
 | `--count`                               |                            | —             | stop after N beats; runs forever when unset |
 | `--acks-leader`                         |                            | off           | require only the leader, not the full ISR   |
+| `--ca-file`                             | `KAAS_CANARY_CA_FILE`      | system roots  | PEM bundle to trust for the Kafka connection |
 
 `--create-topic` is off by default on purpose: a canary pointed at a
 production cluster should observe it rather than change it, and a typo in
@@ -118,12 +119,71 @@ production cluster should observe it rather than change it, and a typo in
 `--schema-registry` has no default and is required, because there is no format
 to fall back to: every record is Avro framed with a schema id, so a canary that
 started without a registry would be writing bytes nothing can read. It takes
-`http://` only, and rejects anything else at the boundary — this binary is
-built with no TLS backend, for the reason spelled out in
+`http://` only, and rejects anything else at the boundary — the *registry
+client* is built with no TLS backend, for the reason spelled out in
 [`Cargo.toml`](Cargo.toml): both of `schema_registry_converter`'s TLS features
 reach for a C project (OpenSSL, or `aws-lc-sys` and cmake), and either one
 would cost the release image its "static musl, one build package" property and
 put a second crypto provider into the same `rustls` kaas-lib uses with `ring`.
+
+That restriction is the registry's alone. **The Kafka connection does TLS**, via
+kaas-lib's own `rustls`/`ring` stack — which is why `--ca-file` exists and why
+talking to a TLS listener needs no feature flag here.
+
+## Workload identity
+
+There are no flags for it. If the environment describes a federated identity,
+this canary authenticates with SASL/OAUTHBEARER; if it does not, it connects the
+way it always has. Nothing in between has to be configured:
+
+| variable | | |
+|---|---|---|
+| `AZURE_CLIENT_ID` | required | the **application (client) id** — not the service principal's object id |
+| `AZURE_TENANT_ID` | required | selects the issuer |
+| `AZURE_FEDERATED_TOKEN_FILE` | required | path to the assertion, re-read on every token fetch |
+| `AZURE_AUTHORITY_HOST` | `https://login.microsoftonline.com/` | for sovereign clouds |
+| `AZURE_KAFKA_SCOPE` | `api://<client-id>/.default` | when the broker wants a token about some other resource |
+
+The first three are exactly what AKS's `azure-wi-webhook` injects, so a pod that
+runs here runs on AKS unchanged — and the reverse. Off-cluster the same three
+can be set by hand. **Setting some but not all three is an error at startup**,
+not a quiet fall back to anonymous: a canary that silently connects to a
+listener nobody meant to test reports on the wrong thing for as long as nobody
+notices.
+
+The token endpoint and scope are derived rather than asked for, so the common
+case needs no configuration at all beyond the identity itself.
+
+Two things follow automatically from an identity being present:
+
+- **TLS is turned on**, with no way to opt out. OAUTHBEARER over a plaintext
+  listener puts an access token on the wire in the clear, and unlike a password
+  a stolen bearer token is honoured from whoever replays it until it expires.
+- **`--ca-file` is usually needed with it.** Strimzi signs its listeners with a
+  per-cluster CA that is in no system trust store; without the flag the
+  handshake fails at connect.
+
+```sh
+# nothing about the canary's own arguments changes
+AZURE_CLIENT_ID=... AZURE_TENANT_ID=... \
+AZURE_FEDERATED_TOKEN_FILE=/var/run/spiffe/svid/azure-token \
+kaas-producer-canary --bootstrap broker:9094 --topic kaas-canary \
+  --schema-registry http://registry:8080/apis/ccompat/v7 \
+  --ca-file /etc/kafka/ca.crt
+```
+
+Where the assertion comes from is not this crate's business — a spiffe-helper
+sidecar writes it in the homelab, the kubelet writes it on AKS. It is a file
+that changes, which is why it is read afresh for each token rather than captured
+at startup: SPIRE's JWT-SVIDs default to a five minute life, well below the
+access token they buy and far below the KIP-368 re-authentication interval.
+
+The exchange itself is [`src/token.rs`](src/token.rs), in this crate rather than
+in kaas-lib. kaas-lib's job ends at `TokenProvider` — "give me a bearer token,
+and a fresh one when I ask again" — and an `AADSTS` error taxonomy is not
+something a Kafka client library should carry for every one of its consumers.
+That module's header records why the official `azure_identity` crate is not the
+dependency here, which is a fact about this image rather than about the crate.
 
 ## Two behaviours worth knowing before you read the output
 

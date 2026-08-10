@@ -7,10 +7,12 @@
 //! boundary means the loop takes a [`Schedule`] it can satisfy rather than an
 //! `Args` it has to interpret.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
+use kafka_conn::TlsConfig;
 use kafka_produce::Acks;
 
 use crate::canary::Schedule;
@@ -79,6 +81,21 @@ pub struct Args {
     /// will appear to lag.
     #[arg(long)]
     pub acks_leader: bool,
+
+    /// PEM bundle to trust for the Kafka connection.
+    ///
+    /// The one piece of the TLS story the environment cannot supply, which is
+    /// why it is a flag when nothing else about authentication is. A broker
+    /// behind a private CA — Strimzi signs its listeners with a per-cluster CA
+    /// of its own — is not in any system trust store, and there is no
+    /// convention that says where its certificate was mounted.
+    ///
+    /// Unset means the system roots, which is right for a broker with a
+    /// publicly-issued certificate and wrong for Strimzi. The symptom of
+    /// forgetting it is a TLS handshake failure at connect, not a later
+    /// authentication error.
+    #[arg(long, env = "KAAS_CANARY_CA_FILE")]
+    pub ca_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -122,6 +139,23 @@ impl Args {
             );
         }
         Ok(url)
+    }
+
+    /// What to trust for the Kafka connection.
+    ///
+    /// Read here rather than inside the connection so that an unreadable bundle
+    /// is reported as the flag that named it, at startup, alongside the other
+    /// boundary checks — and not as a handshake failure once the cluster is
+    /// reachable.
+    pub fn tls_config(&self) -> Result<TlsConfig> {
+        match &self.ca_file {
+            Some(path) => {
+                let pem = std::fs::read(path)
+                    .with_context(|| format!("reading --ca-file {}", path.display()))?;
+                Ok(TlsConfig::with_ca_pem(pem))
+            }
+            None => Ok(TlsConfig::system()),
+        }
     }
 
     /// What the heartbeat loop needs.
