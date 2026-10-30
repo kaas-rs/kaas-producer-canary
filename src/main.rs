@@ -129,8 +129,13 @@ async fn main() -> Result<()> {
 
     // Before the producer, and fatal: see `registry`'s module docs. A canary
     // that cannot encode has nothing to say, and finding that out now is
-    // cheaper than finding it out once a second for a week.
-    let encoder = Encoder::register(registry_url, &args.topic).await?;
+    // cheaper than finding it out once a second for a week. The token, when
+    // the registry wants one, is fatal on the same terms.
+    let registry_token = match &identity {
+        Some(identity) => identity.registry_token().await?,
+        None => None,
+    };
+    let encoder = Encoder::register(registry_url, &args.topic, registry_token.as_deref()).await?;
 
     let config = ProducerConfig::new().acks(args.acks());
     let producer = Producer::new(admin.cluster().clone(), config);

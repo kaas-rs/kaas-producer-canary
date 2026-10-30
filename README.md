@@ -143,6 +143,7 @@ way it always has. Nothing in between has to be configured:
 | `AZURE_FEDERATED_TOKEN_FILE` | required | path to the assertion, re-read on every token fetch |
 | `AZURE_AUTHORITY_HOST` | `https://login.microsoftonline.com/` | for sovereign clouds |
 | `AZURE_KAFKA_SCOPE` | `api://<client-id>/.default` | when the broker wants a token about some other resource |
+| `AZURE_SCHEMA_REGISTRY_SCOPE` | unset: anonymous | when the schema registry requires a token: its app registration's scope, e.g. `<registry client id>/.default` |
 
 The first three are exactly what AKS's `azure-wi-webhook` injects, so a pod that
 runs here runs on AKS unchanged — and the reverse. Off-cluster the same three
@@ -153,6 +154,17 @@ notices.
 
 The token endpoint and scope are derived rather than asked for, so the common
 case needs no configuration at all beyond the identity itself.
+
+The registry scope is the exception, because there is nothing to derive it
+from: a registry that enforces authentication wants a token about *its own* app
+registration. With it set, the schema registration at startup carries
+`Authorization: Bearer` with a token for that scope — the only registry call the
+producer makes, so the token is fetched once and never refreshed. Unset, the
+registry is called anonymously, as before. **Setting it without the identity is
+an error at startup**, for the same reason as a half-set identity. The token
+goes over the registry's `http://` URL in the clear; its audience is the
+registry alone and it expires within the hour, but TLS on the registry is the
+real fix.
 
 Two things follow automatically from an identity being present:
 
