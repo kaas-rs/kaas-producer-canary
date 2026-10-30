@@ -33,6 +33,20 @@
 //! resolved schema and its id, so once [`Encoder::register`] has succeeded the
 //! encode path makes no HTTP calls at all: the registry can go down for the
 //! rest of the run without costing a single heartbeat.
+//!
+//! # Authentication
+//!
+//! A registry that requires a token gets one bearer token, attached to the
+//! registration and used for nothing else. The same property that makes a
+//! registry outage harmless after startup makes token refresh unnecessary: an
+//! encoder that never calls the registry again never presents an expired
+//! token to it. Where the token comes from is [`crate::identity`]'s concern.
+//!
+//! It travels over plain HTTP — `--schema-registry` accepts `http://` only, for
+//! the reasons in `Cargo.toml` — which is the exposure `main.rs` refuses for
+//! Kafka. It is tolerated here because the token's audience is the registry
+//! alone and it expires within the hour, whereas an OAUTHBEARER token is
+//! accepted by every broker in the cluster. TLS on the registry is the fix.
 
 use anyhow::{Context, Result};
 use schema_registry_converter::async_impl::avro::AvroEncoder;
@@ -84,8 +98,15 @@ impl Encoder {
     /// Registering the same schema twice returns the existing version rather
     /// than making a new one, so restarts do not accumulate versions. That was
     /// checked against Apicurio rather than taken from the documentation.
-    pub async fn register(url: &str, topic: &str) -> Result<Self> {
-        let settings = SrSettings::new_builder(url.to_owned())
+    ///
+    /// `bearer` is sent as `Authorization: Bearer` when present; `None` calls
+    /// the registry anonymously, as this canary always has.
+    pub async fn register(url: &str, topic: &str, bearer: Option<&str>) -> Result<Self> {
+        let mut builder = SrSettings::new_builder(url.to_owned());
+        if let Some(token) = bearer {
+            builder.set_token_authorization(token);
+        }
+        let settings = builder
             .build()
             .map_err(anyhow::Error::new)
             .with_context(|| format!("configuring the schema registry client for {url}"))?;
@@ -116,6 +137,10 @@ impl Encoder {
             subject = %subject,
             schema_id = registered.id,
             registry = %url,
+            // The registry-side counterpart of `auth` on "canary starting": a
+            // 401 from a registry that started enforcing is the first thing
+            // this answers.
+            registry_auth = if bearer.is_some() { "oauthbearer" } else { "none" },
             "schema registered"
         );
 

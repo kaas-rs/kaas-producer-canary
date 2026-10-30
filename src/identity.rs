@@ -33,12 +33,25 @@
 //! alternative is to treat "two of three" as "identity off", which produces a
 //! canary that silently connects anonymously and reports on a listener nobody
 //! meant to test. It fails at startup instead, naming what is missing.
+//!
+//! # The schema registry is opt-in, and asked for rather than derived
+//!
+//! `AZURE_SCHEMA_REGISTRY_SCOPE` is the one value here with no default. The
+//! Kafka scope can be derived because the broker accepts a token about this
+//! application itself; a registry that enforces authentication wants a token
+//! about *its own* app registration, and nothing in the environment says which
+//! one that is. Unset means the registry is called anonymously, as it always
+//! has been — so the variable can ship ahead of any registry that requires it.
+//!
+//! Set without an identity it is a mistake of the same kind as a half-set
+//! identity, and fails the same way: a registry scope is a request for a token,
+//! and with no identity there is nothing to ask with.
 
 use std::env;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
-use kafka_conn::SaslConfig;
+use anyhow::{Context, Result, bail};
+use kafka_conn::{SaslConfig, TokenProvider};
 
 use crate::token::FederatedTokenProvider;
 
@@ -53,6 +66,9 @@ const TOKEN_FILE: &str = "AZURE_FEDERATED_TOKEN_FILE";
 const AUTHORITY_HOST: &str = "AZURE_AUTHORITY_HOST";
 /// An escape hatch for a broker that wants a token about some other resource.
 const SCOPE: &str = "AZURE_KAFKA_SCOPE";
+/// The registry's own scope, when it requires a token. See the module docs for
+/// why this one has no default.
+const REGISTRY_SCOPE: &str = "AZURE_SCHEMA_REGISTRY_SCOPE";
 
 /// Where the public cloud's token endpoints live.
 const DEFAULT_AUTHORITY: &str = "https://login.microsoftonline.com/";
@@ -65,6 +81,7 @@ pub struct WorkloadIdentity {
     token_file: PathBuf,
     authority: String,
     scope: String,
+    registry_scope: Option<String>,
 }
 
 impl WorkloadIdentity {
@@ -74,29 +91,49 @@ impl WorkloadIdentity {
     /// deployment — an unauthenticated listener is what this canary has always
     /// connected to. `Err` means one was half-configured.
     pub fn from_env() -> Result<Option<Self>> {
-        let client_id = present(CLIENT_ID);
-        let tenant_id = present(TENANT_ID);
-        let token_file = present(TOKEN_FILE);
+        Self::from_vars(present)
+    }
+
+    /// The rules of [`Self::from_env`], over any source of variables.
+    ///
+    /// Split out so the rules can be tested without `std::env::set_var`, which
+    /// is process-global — and `unsafe` in edition 2024 for exactly that
+    /// reason — so tests setting it would race each other. `var` must already
+    /// treat blank as absent, as [`present`] does.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+        let client_id = var(CLIENT_ID);
+        let tenant_id = var(TENANT_ID);
+        let token_file = var(TOKEN_FILE);
+        let registry_scope = var(REGISTRY_SCOPE);
 
         match (client_id, tenant_id, token_file) {
-            (None, None, None) => Ok(None),
+            (None, None, None) => {
+                if registry_scope.is_some() {
+                    bail!(
+                        "{REGISTRY_SCOPE} is set but no workload identity is: a registry \
+                         scope asks for a token, and without {CLIENT_ID}, {TENANT_ID} and \
+                         {TOKEN_FILE} there is nothing to ask with. Set the identity, or \
+                         unset {REGISTRY_SCOPE} to call the registry anonymously."
+                    );
+                }
+                Ok(None)
+            }
             (Some(client_id), Some(tenant_id), Some(token_file)) => {
-                let authority = present(AUTHORITY_HOST)
-                    .unwrap_or_else(|| DEFAULT_AUTHORITY.to_owned());
+                let authority = var(AUTHORITY_HOST).unwrap_or_else(|| DEFAULT_AUTHORITY.to_owned());
                 // `<client-id>/.default` is Entra's way of saying "a token for
                 // this application, with whatever it has been granted". The
                 // `api://` form is the Application ID URI, which the app
                 // registration has to expose — without it the exchange fails at
                 // the issuer with `AADSTS500011`, naming a resource principal
                 // rather than the missing URI.
-                let scope = present(SCOPE)
-                    .unwrap_or_else(|| format!("api://{client_id}/.default"));
+                let scope = var(SCOPE).unwrap_or_else(|| format!("api://{client_id}/.default"));
                 Ok(Some(Self {
                     client_id,
                     tenant_id,
                     token_file: PathBuf::from(token_file),
                     authority,
                     scope,
+                    registry_scope,
                 }))
             }
             (client_id, tenant_id, token_file) => {
@@ -150,6 +187,31 @@ impl WorkloadIdentity {
         Ok(SaslConfig::oauth_bearer(provider))
     }
 
+    /// A token for the schema registry, or `None` when it is called
+    /// anonymously.
+    ///
+    /// Fetched once, not cached: the producer talks to the registry exactly
+    /// once, when it registers its schema, and never again — see
+    /// [`crate::registry`]. A provider kept for a single call would be a cache
+    /// nothing reads. Same client id and assertion as the Kafka connection, a
+    /// different resource.
+    pub async fn registry_token(&self) -> Result<Option<String>> {
+        let Some(scope) = &self.registry_scope else {
+            return Ok(None);
+        };
+        let provider = FederatedTokenProvider::new(
+            &self.token_endpoint(),
+            &self.client_id,
+            scope,
+            &self.token_file,
+        )?;
+        let token = provider
+            .token()
+            .await
+            .with_context(|| format!("fetching a schema registry token for {scope}"))?;
+        Ok(Some(token))
+    }
+
     /// What to log at startup, with nothing secret in it.
     ///
     /// The client id and tenant are identifiers, not credentials; the assertion
@@ -157,11 +219,12 @@ impl WorkloadIdentity {
     /// single most likely thing to be wrong.
     pub fn describe(&self) -> String {
         format!(
-            "client_id={} tenant={} assertion={} scope={}",
+            "client_id={} tenant={} assertion={} scope={} registry_scope={}",
             self.client_id,
             self.tenant_id,
             self.token_file.display(),
-            self.scope
+            self.scope,
+            self.registry_scope.as_deref().unwrap_or("none")
         )
     }
 }
@@ -190,7 +253,66 @@ mod tests {
             token_file: PathBuf::from("/var/run/spiffe/svid/azure-token"),
             authority: DEFAULT_AUTHORITY.to_owned(),
             scope: "api://app-id/.default".to_owned(),
+            registry_scope: None,
         }
+    }
+
+    /// A variable source holding exactly `vars`, as [`present`] would see it.
+    fn vars(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    const IDENTITY: [(&str, &str); 3] = [
+        (CLIENT_ID, "app-id"),
+        (TENANT_ID, "tenant-id"),
+        (TOKEN_FILE, "/var/run/spiffe/svid/azure-token"),
+    ];
+
+    #[test]
+    fn no_registry_scope_means_an_anonymous_registry() {
+        let identity = WorkloadIdentity::from_vars(vars(&IDENTITY))
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.registry_scope, None);
+    }
+
+    #[test]
+    fn a_registry_scope_rides_along_with_the_identity() {
+        let mut with_scope = IDENTITY.to_vec();
+        with_scope.push((REGISTRY_SCOPE, "registry-id/.default"));
+
+        let identity = WorkloadIdentity::from_vars(vars(&with_scope))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            identity.registry_scope.as_deref(),
+            Some("registry-id/.default")
+        );
+        // The Kafka scope is not affected by it.
+        assert_eq!(identity.scope, "api://app-id/.default");
+    }
+
+    #[test]
+    fn a_registry_scope_without_an_identity_is_refused() {
+        let err = WorkloadIdentity::from_vars(vars(&[(REGISTRY_SCOPE, "registry-id/.default")]))
+            .unwrap_err();
+        assert!(format!("{err}").contains(REGISTRY_SCOPE), "{err}");
+    }
+
+    #[test]
+    fn nothing_set_is_still_no_identity() {
+        assert!(WorkloadIdentity::from_vars(vars(&[])).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_registry_fetches_no_token() {
+        // No scope, so no request goes out — the assertion file does not even
+        // have to exist.
+        assert_eq!(identity().registry_token().await.unwrap(), None);
     }
 
     #[test]
@@ -207,7 +329,10 @@ mod tests {
     #[test]
     fn describe_carries_the_assertion_path_but_never_its_contents() {
         let rendered = identity().describe();
-        assert!(rendered.contains("/var/run/spiffe/svid/azure-token"), "{rendered}");
+        assert!(
+            rendered.contains("/var/run/spiffe/svid/azure-token"),
+            "{rendered}"
+        );
         assert!(rendered.contains("client_id=app-id"), "{rendered}");
     }
 
