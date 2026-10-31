@@ -102,7 +102,7 @@ share a millisecond timestamp, and pids repeat across restarts and containers.
 | flag                                    | env                            | default       |                                             |
 |-----------------------------------------|--------------------------------|---------------|---------------------------------------------|
 | `--bootstrap`                           | `KAAS_CANARY_BOOTSTRAP`        | —             | comma-separated `host:port`                 |
-| `--schema-registry`                     | `KAAS_CANARY_SCHEMA_REGISTRY`  | —             | ccompat base URL; `http://` only            |
+| `--schema-registry`                     | `KAAS_CANARY_SCHEMA_REGISTRY`  | —             | ccompat base URL, `http://` or `https://`   |
 | `--topic`                               | `KAAS_CANARY_TOPIC`            | `kaas-canary` |                                             |
 | `--interval-ms`                         | `KAAS_CANARY_INTERVAL_MS`  | `1000`        |                                             |
 | `--create-topic`                        | `KAAS_CANARY_CREATE_TOPIC` | off           | create the topic if missing                 |
@@ -111,6 +111,7 @@ share a millisecond timestamp, and pids repeat across restarts and containers.
 | `--count`                               |                            | —             | stop after N beats; runs forever when unset |
 | `--acks-leader`                         |                            | off           | require only the leader, not the full ISR   |
 | `--ca-file`                             | `KAAS_CANARY_CA_FILE`      | system roots  | PEM bundle to trust for the Kafka connection |
+| `--schema-registry-ca-file`             | `KAAS_CANARY_SCHEMA_REGISTRY_CA_FILE` | system roots | PEM bundle to trust for an `https://` registry |
 
 `--create-topic` is off by default on purpose: a canary pointed at a
 production cluster should observe it rather than change it, and a typo in
@@ -118,17 +119,21 @@ production cluster should observe it rather than change it, and a typo in
 
 `--schema-registry` has no default and is required, because there is no format
 to fall back to: every record is Avro framed with a schema id, so a canary that
-started without a registry would be writing bytes nothing can read. It takes
-`http://` only, and rejects anything else at the boundary — the *registry
-client* is built with no TLS backend, for the reason spelled out in
-[`Cargo.toml`](Cargo.toml): both of `schema_registry_converter`'s TLS features
-reach for a C project (OpenSSL, or `aws-lc-sys` and cmake), and either one
-would cost the release image its "static musl, one build package" property and
-put a second crypto provider into the same `rustls` kaas-lib uses with `ring`.
+started without a registry would be writing bytes nothing can read.
 
-That restriction is the registry's alone. **The Kafka connection does TLS**, via
-kaas-lib's own `rustls`/`ring` stack — which is why `--ca-file` exists and why
-talking to a TLS listener needs no feature flag here.
+An `https://` registry is verified against `--schema-registry-ca-file`, or the
+system roots when it is unset — and the release image has none, so an
+in-cluster registry behind a private CA needs the flag. It is separate from
+`--ca-file` because the two are usually different CAs: Strimzi signs its
+listeners with a per-cluster CA, and a registry's certificate comes from
+wherever the platform issues service certificates. Setting it beside an
+`http://` URL is an error rather than a no-op.
+
+Both connections use `rustls` with `ring`, named when each client is built
+rather than installed process-wide. `schema_registry_converter`'s own TLS
+features stay off, for the reason in [`Cargo.toml`](Cargo.toml): both reach for
+a C project (OpenSSL, or `aws-lc-sys` and cmake), which would cost the release
+image its "static musl, one build package" property.
 
 ## Workload identity
 
@@ -268,6 +273,8 @@ Sync is manual in this cluster, deliberately: a merged commit is not evidence
 that anything changed. Check `argocd app get kaas`, not the git log.
 
 Both instances point `--schema-registry` at the one Apicurio in the `apicurio`
+namespace, over `https://`, with `--schema-registry-ca-file` naming the
+`ca.crt` of the `trust-bundle` ConfigMap trust-manager puts in every
 namespace. They write to same-named topics on two different clusters and so
 share the subject `kaas-canary-v1-value`, which is fine precisely because they
 publish an identical schema — two writers agreeing on one subject is cheaper

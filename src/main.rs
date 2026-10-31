@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
     // was reachable — and on an unreachable cluster, never at all.
     let bootstrap = args.bootstrap_servers()?;
     let registry_url = args.schema_registry_url()?;
+    let registry_trust = args.schema_registry_trust()?;
     // Also before the connection, and for the same reason: a half-set identity
     // is a configuration fault, and finding it here means the message names the
     // variable rather than the handshake it eventually broke.
@@ -135,7 +136,13 @@ async fn main() -> Result<()> {
         Some(identity) => identity.registry_token().await?,
         None => None,
     };
-    let encoder = Encoder::register(registry_url, &args.topic, registry_token.as_deref()).await?;
+    let encoder = Encoder::register(
+        registry_url,
+        &args.topic,
+        registry_token.as_deref(),
+        &registry_trust,
+    )
+    .await?;
 
     let config = ProducerConfig::new().acks(args.acks());
     let producer = Producer::new(admin.cluster().clone(), config);
