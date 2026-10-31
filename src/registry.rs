@@ -42,13 +42,27 @@
 //! encoder that never calls the registry again never presents an expired
 //! token to it. Where the token comes from is [`crate::identity`]'s concern.
 //!
-//! It travels over plain HTTP — `--schema-registry` accepts `http://` only, for
-//! the reasons in `Cargo.toml` — which is the exposure `main.rs` refuses for
-//! Kafka. It is tolerated here because the token's audience is the registry
-//! alone and it expires within the hour, whereas an OAUTHBEARER token is
-//! accepted by every broker in the cluster. TLS on the registry is the fix.
+//! Over an `http://` registry it travels in the clear, which is the exposure
+//! `main.rs` refuses for Kafka. That stays possible because the token's
+//! audience is the registry alone and it expires within the hour, whereas an
+//! OAUTHBEARER token is accepted by every broker in the cluster — but an
+//! `https://` registry, verified against `--schema-registry-ca-file`, is the
+//! configuration to run.
+//!
+//! # TLS
+//!
+//! The registry client is reqwest, handed a finished rustls `ClientConfig`
+//! that names `ring`, for the reason [`crate::token`]'s connector does: a
+//! process-wide default provider is global state any dependency could install
+//! first. reqwest is built without a provider of its own (`Cargo.toml`), so it
+//! is always handed one here, `http://` registry or not — without it, building
+//! the client panics.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use schema_registry_converter::async_impl::avro::AvroEncoder;
 use schema_registry_converter::async_impl::schema_registry::SrSettings;
 use schema_registry_converter::avro_common::get_supplied_schema;
@@ -56,6 +70,71 @@ use schema_registry_converter::error::SRCError;
 use schema_registry_converter::schema_registry_common::{SubjectNameStrategy, SuppliedSchema};
 
 use crate::heartbeat::{self, Heartbeat};
+
+/// What an `https://` registry's certificate is verified against.
+#[derive(Debug)]
+pub enum RegistryTrust {
+    /// The system trust store. Empty in a scratch image, which is why
+    /// registering against an `https://` registry with it fails at startup
+    /// rather than at the handshake.
+    System,
+    /// These roots and no others: `--schema-registry-ca-file`.
+    Roots(Vec<CertificateDer<'static>>),
+}
+
+impl RegistryTrust {
+    /// Every certificate in a PEM bundle. Other PEM sections are skipped; a
+    /// bundle with no certificate in it is an error, because an empty trust
+    /// store verifies nothing and would fail every handshake.
+    pub fn from_pem(pem: &[u8]) -> Result<Self> {
+        let roots = CertificateDer::pem_slice_iter(pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("not a PEM bundle: {e}"))?;
+        if roots.is_empty() {
+            anyhow::bail!("no certificates in the PEM bundle");
+        }
+        Ok(Self::Roots(roots))
+    }
+
+    /// The root store these name. A certificate rustls cannot use is skipped,
+    /// as [`crate::token`] skips one in the system bundle; a bundle of nothing
+    /// but those is an empty store, which [`http_client`] reports.
+    fn root_store(&self) -> rustls::RootCertStore {
+        let mut roots = rustls::RootCertStore::empty();
+        match self {
+            Self::System => {
+                roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+            }
+            Self::Roots(certs) => {
+                roots.add_parsable_certificates(certs.iter().cloned());
+            }
+        }
+        roots
+    }
+}
+
+/// The registry client's HTTP client, with `ring` named rather than assumed.
+///
+/// An empty root store is refused for an `https://` URL only: an `http://`
+/// registry never reaches the TLS configuration, and in a scratch image the
+/// system store is empty, which must not stop a plaintext registry working.
+fn http_client(url: &str, trust: &RegistryTrust) -> Result<reqwest::ClientBuilder> {
+    let roots = trust.root_store();
+    if url.starts_with("https://") && roots.is_empty() {
+        anyhow::bail!(
+            "no usable roots to verify the schema registry at {url} with: \
+             set --schema-registry-ca-file"
+        );
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("building the schema registry's tls configuration")?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(reqwest::Client::builder().tls_backend_preconfigured(tls))
+}
 
 /// The heartbeat schema, in the shape the registry client posts.
 ///
@@ -100,14 +179,20 @@ impl Encoder {
     /// checked against Apicurio rather than taken from the documentation.
     ///
     /// `bearer` is sent as `Authorization: Bearer` when present; `None` calls
-    /// the registry anonymously, as this canary always has.
-    pub async fn register(url: &str, topic: &str, bearer: Option<&str>) -> Result<Self> {
+    /// the registry anonymously, as this canary always has. `trust` is what an
+    /// `https://` registry's certificate is checked against.
+    pub async fn register(
+        url: &str,
+        topic: &str,
+        bearer: Option<&str>,
+        trust: &RegistryTrust,
+    ) -> Result<Self> {
         let mut builder = SrSettings::new_builder(url.to_owned());
         if let Some(token) = bearer {
             builder.set_token_authorization(token);
         }
         let settings = builder
-            .build()
+            .build_with(http_client(url, trust)?)
             .map_err(anyhow::Error::new)
             .with_context(|| format!("configuring the schema registry client for {url}"))?;
 
@@ -170,6 +255,66 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A self-signed root with nothing else to it, generated for these tests.
+    const ROOT_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBjTCCATOgAwIBAgIUbSEnRzKPlAYmBr5zPnRLC3yLh7cwCgYIKoZIzj0EAwIw
+GzEZMBcGA1UEAwwQY2FuYXJ5LXRlc3Qtcm9vdDAgFw0yNjEwMzEwNjQ5NDNaGA8y
+MTI2MTAwNzA2NDk0M1owGzEZMBcGA1UEAwwQY2FuYXJ5LXRlc3Qtcm9vdDBZMBMG
+ByqGSM49AgEGCCqGSM49AwEHA0IABHUJZMqmXihQ1akrEcIaFO34ShSRlkKSHWIf
+jZYhowPPAQ79BSorTLnZ1mW5HibVwDHpmGDT6bjryQPMD/P0dPajUzBRMB0GA1Ud
+DgQWBBT3eSGaCwDr8UQGf+Vj6XfdaMxygzAfBgNVHSMEGDAWgBT3eSGaCwDr8UQG
+f+Vj6XfdaMxygzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQD1
+ZWHSEaEjFc/53Z/TGhaHMyy4CSxZBxNLHNTngx4WLQIgBitEkiBY8Ny43xxu4P2O
+4a95O14YWy2M0nHXvvyNnvY=
+-----END CERTIFICATE-----
+";
+
+    /// The regression `Cargo.toml` warns about: reqwest is built without a
+    /// crypto provider and panics building a client unless it is handed one.
+    /// Nothing in these tests installs a process-wide default, so a client
+    /// that builds here was given its provider by [`http_client`].
+    #[test]
+    fn a_client_builds_without_a_process_wide_crypto_provider() {
+        let trust = RegistryTrust::from_pem(ROOT_PEM.as_bytes()).unwrap();
+        http_client("https://registry:8443", &trust)
+            .unwrap()
+            .build()
+            .unwrap();
+        http_client("http://registry:8080", &RegistryTrust::Roots(Vec::new()))
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+
+    /// An https registry with nothing to verify it against would fail every
+    /// handshake; saying so at startup names the flag that fixes it.
+    #[test]
+    fn an_https_registry_with_no_roots_is_refused_up_front() {
+        let err = http_client("https://registry:8443", &RegistryTrust::Roots(Vec::new()))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("--schema-registry-ca-file"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_pem_bundle_yields_its_certificates() {
+        let twice = format!("{ROOT_PEM}{ROOT_PEM}");
+        match RegistryTrust::from_pem(twice.as_bytes()).unwrap() {
+            RegistryTrust::Roots(roots) => assert_eq!(roots.len(), 2),
+            RegistryTrust::System => panic!("a bundle is not the system store"),
+        }
+    }
+
+    #[test]
+    fn a_file_with_no_certificate_is_refused() {
+        let err = RegistryTrust::from_pem(b"not a certificate\n").unwrap_err();
+        assert!(err.to_string().contains("no certificates"), "{err}");
+    }
 
     /// The subject is the half of the registry contract that is not in the
     /// schema. Every reader of this topic resolves the same string, and it is

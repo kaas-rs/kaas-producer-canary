@@ -77,10 +77,7 @@ rustls-native-certs = "0.8"
 # `default_provider()` resolves to for the Kafka connection this canary exists
 # to watch. That is not a change to make as a side effect of adding Avro.
 #
-# The cost is that `--schema-registry` takes `http://` only; `cli.rs` rejects
-# anything else at the boundary rather than letting reqwest fail per-record
-# with a message about URL schemes. In-cluster that is the whole requirement —
-# the registry is a ClusterIP service one hop away.
+# TLS to the registry comes from `reqwest` below instead.
 #
 # `futures` is what gates `async_impl`; without it only the blocking encoder
 # exists, and a blocking HTTP call inside a tokio worker is not an option here.
@@ -90,6 +87,13 @@ rustls-native-certs = "0.8"
 # `Schema` handed to `get_supplied_schema` is that crate's type, not ours.
 schema_registry_converter = { version = "4.10", default-features = false, features = ["avro", "futures"] }
 apache-avro = "0.21"
+# The registry client's TLS, on the one copy of reqwest the converter already
+# brings. `rustls-no-provider` adds rustls with no crypto provider of its own,
+# so no aws-lc. It also leaves reqwest with nothing to fall back on: building
+# a client panics unless a process-wide default is installed. This crate
+# installs none, for the reason above `rustls`, and hands reqwest a finished
+# `ClientConfig` naming `ring` instead (`registry.rs`).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 
 tokio  = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "time"] }
 clap   = { version = "4.5", features = ["derive", "env"] }
